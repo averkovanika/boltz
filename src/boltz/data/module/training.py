@@ -17,6 +17,178 @@ from boltz.data.sample.sampler import Sample, Sampler
 from boltz.data.tokenize.tokenizer import Tokenizer
 from boltz.data.types import MSA, Connection, Input, Manifest, Record, Structure
 
+import numpy as np
+import random
+import networkx as nx
+from dataclasses import replace
+
+# ----------------------------
+# Helper Functions
+# ----------------------------
+
+def pairwise_distances(group1, group2):
+    """
+    Calculate the pairwise distances between two groups of atoms.
+
+    Parameters:
+        group1: numpy array of shape (n, 3) representing coordinates of group 1
+        group2: numpy array of shape (m, 3) representing coordinates of group 2
+
+    Returns:
+        distances: numpy array of shape (n, m) with distances.
+    """
+    diff = group1[:, np.newaxis, :] - group2[np.newaxis, :, :]
+    distances = np.sqrt(np.sum(diff ** 2, axis=-1))
+    return distances
+
+
+def get_contacts_dict(group1, group2, cutoff):
+    """
+    For each atom in group1, return a list of indices in group2 that are within the cutoff.
+
+    Parameters:
+        group1: numpy array (n, 3)
+        group2: numpy array (m, 3)
+        cutoff: float, distance threshold.
+
+    Returns:
+        A dict mapping each atom index in group1 to a list of indices (local to group2) within cutoff.
+    """
+    distances = pairwise_distances(group1, group2)
+    within_cutoff = (distances < cutoff) & (distances > 0)
+    contact_dictionary = {}
+    for i in range(group1.shape[0]):
+        contact_dictionary[i] = np.where(within_cutoff[i])[0].tolist()
+    return contact_dictionary
+
+def get_peptide_chain_id(sample):
+    """
+    Select at random one peptide chain (mol_type==0, valid==True, num_residues ≤30),
+    and return its chain_id. Raises a ValueError if no such chain exists.
+    """
+    chains = sample.record.chains
+    peptide_chains = [c for c in chains if c.mol_type == 0 and c.valid and c.num_residues <= 30]
+
+    if not peptide_chains:
+        raise ValueError(
+            f"No valid protein chain with ≤30 residues in sample {sample.record.id}"
+        )
+    peptide_chain = random.choice(peptide_chains)
+
+    return peptide_chain.chain_id
+
+def get_chain_coordinates(chain_id):
+        """
+        Return the global start index, atom count, and coordinate array for a given chain.
+        """
+        atom_start = int(structure.chains[chain_id]['atom_idx'])
+        atom_count = int(structure.chains[chain_id]['atom_num'])
+        coords = structure.atoms[atom_start : atom_start + atom_count]['coords']
+        return atom_start, atom_count, coords
+
+# ----------------------------
+# Main Function: compute_connections
+# ----------------------------
+
+def compute_connections(sample, structure, cutoff_distance=3.5):
+    """
+    Gets information from the record and structure, computes the peptide-protein contacts,
+    and returns a numpy array of connection tuples.
+
+    The connection tuple has the following structure:
+      (peptide_chain_id, protein_chain_id, peptide_residue, protein_residue, peptide_atom, protein_atom)
+
+    Parameters:
+        sample
+        structure
+        cutoff_distance: distance threshold for contacts.
+
+    Returns:
+        connections: numpy array with the specified Connection dtype.
+    """
+    peptide_chain_id = get_peptide_chain_id(sample)
+
+    # Identify the protein chains that interact with the peptide from the manifest interfaces
+    interfaces = sample.record.interfaces
+    prot_chain_ids = [
+        i.chain_2 if i.chain_1 == peptide_chain_id else i.chain_1
+        for i in interfaces if i.valid and peptide_chain_id in (i.chain_1, i.chain_2)
+    ]
+
+    # Extract peptide atom coordinates
+    peptide_start_idx, peptide_atom_count, peptide_coords = get_chain_coordinates(peptide_chain_id)
+
+    # Build protein coordinates and a mapping of local (concatenated) indices to global indices
+    protein_coords_list = []
+    protein_global_indices_list = []
+    for prot_chain_id in prot_chain_ids:
+        start_idx, atom_count, coords = get_chain_coordinates(prot_chain_id)
+        protein_coords_list.append(coords)
+        global_indices = np.arange(start_idx, start_idx + atom_count)
+        protein_global_indices_list.append(global_indices)
+
+    all_protein_coords = np.concatenate(protein_coords_list, axis=0)
+    all_protein_global_indices = np.concatenate(protein_global_indices_list, axis=0)
+
+    # Compute the contacts between peptide and protein atoms (in local indices)
+    local_contacts_dict = get_contacts_dict(peptide_coords, all_protein_coords, cutoff_distance)
+
+    # in global indices
+    global_contacts_dict = {
+        peptide_start_idx + pep_local_idx: [all_protein_global_indices[prot_local_idx] for prot_local_idx in prot_local_idx_list]
+        for pep_local_idx, prot_local_idx_list in local_contacts_dict.items()
+    }
+
+    # Build atom → residue and atom → chain mappings for later connection lookup
+    atom2res = {}
+    res_id = 0
+    for res in structure.residues:
+        for i in range(res['atom_num']):
+            atom2res[res['atom_idx'] + i] = res_id
+        res_id += 1
+
+    atom2chain = {}
+    for atom_idx in range(peptide_start_idx, peptide_start_idx + peptide_atom_count):
+        atom2chain[atom_idx] = peptide_chain_id
+    for prot_chain_id in prot_chain_ids:
+        start_idx, atom_count, coords = get_chain_coordinates(prot_chain_id)
+        for atom_idx in range(start_idx, start_idx + atom_count):
+            atom2chain[atom_idx] = prot_chain_id
+
+    # Map each peptide residue to the list of its global atom indices
+    peptide_residue_atoms = {
+        res_id: list(range(res['atom_idx'], res['atom_idx'] + res['atom_num']))
+        for res_id, res in enumerate(structure.residues)
+        if atom2chain.get(res['atom_idx']) == peptide_chain_id
+    }
+
+    # Build the list of peptide‐residues that have at least one contacting atom
+    contacted_peptide_residues = []
+    for res_id, atoms in peptide_residue_atoms.items():
+        contacted_atoms = [atom for atom in atoms if atom in global_contacts_dict]
+        if contacted_atoms:
+            contacted_peptide_residues.append((res_id, atoms, contacted_atoms))
+
+    # randomly choose one peptide residue and its atoms in contact
+    chosen_res_id, all_atoms, selected_atoms = random.choice(contacted_peptide_residues)
+    fixed_contacts = {global_atom: global_contacts_dict[global_atom] for global_atom in selected_atoms}
+
+    # Build the final connections list
+    connections = [
+        (
+            peptide_chain_id,                # peptide chain
+            atom2chain[prot_atom],           # protein chain
+            atom2res[pep_atom],              # peptide residue
+            atom2res[prot_atom],             # protein residue
+            pep_atom,                        # peptide atom (global idx)
+            prot_atom                        # protein atom (global idx)
+        )
+        for pep_atom, prot_list in fixed_contacts.items()
+        for prot_atom in prot_list
+    ]
+
+    connections = np.array(connections, dtype=Connection)
+    return connections
 
 @dataclass
 class DatasetConfig:
@@ -249,6 +421,10 @@ class TrainingDataset(torch.utils.data.Dataset):
                 f"Failed to load input for {sample.record.id} with error {e}. Skipping."
             )
             return self.__getitem__(idx)
+
+        connections = compute_connections(sample, input_data.structure)
+        input_data = replace(
+            input_data, structure=replace(input_data.structure, connections=connections))
 
         # Tokenize structure
         try:
