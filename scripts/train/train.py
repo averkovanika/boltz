@@ -202,7 +202,7 @@ def train(raw_config: str, args: list[str]) -> None:  # noqa: C901, PLR0912, PLR
     if (isinstance(devices, int) and devices > 1) or (
         isinstance(devices, (list, listconfig.ListConfig)) and len(devices) > 1
     ):
-        strategy = DDPStrategy(find_unused_parameters=cfg.find_unused_parameters)
+        strategy = DDPStrategy(find_unused_parameters=cfg.find_unused_parameters, static_graph=True)
 
     trainer = pl.Trainer(
         default_root_dir=str(dirpath),
@@ -211,6 +211,7 @@ def train(raw_config: str, args: list[str]) -> None:  # noqa: C901, PLR0912, PLR
         logger=loggers,
         enable_checkpointing=not cfg.disable_checkpoint,
         reload_dataloaders_every_n_epochs=1,
+        num_sanity_val_steps=0,
         **trainer,
     )
 
