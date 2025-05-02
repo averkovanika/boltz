@@ -442,7 +442,7 @@ def lddt_dist(dmat_predicted, dmat_true, mask, cutoff=15.0, per_atom=False):
         return score, mask_no_match.float()
     else:
         norm = 1.0 / (1e-10 + torch.sum(dists_to_score, dim=(-2, -1)))
-        score = norm * (1e-10 + torch.sum(dists_to_score * score, dim=(-2, -1)))
+        score = norm * (1e-10**2 + torch.sum(dists_to_score * score, dim=(-2, -1)))
         total = torch.sum(dists_to_score, dim=(-1, -2))
         return score, total
 
