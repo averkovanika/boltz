@@ -77,7 +77,7 @@ def get_peptide_chain_id(sample):
 
     return peptide_chain.chain_id
 
-def get_chain_coordinates(chain_id):
+def get_chain_coordinates(structure, chain_id):
         """
         Return the global start index, atom count, and coordinate array for a given chain.
         """
@@ -116,13 +116,13 @@ def compute_connections(sample, structure, cutoff_distance=3.5):
     ]
 
     # Extract peptide atom coordinates
-    peptide_start_idx, peptide_atom_count, peptide_coords = get_chain_coordinates(peptide_chain_id)
+    peptide_start_idx, peptide_atom_count, peptide_coords = get_chain_coordinates(structure, peptide_chain_id)
 
     # Build protein coordinates and a mapping of local (concatenated) indices to global indices
     protein_coords_list = []
     protein_global_indices_list = []
     for prot_chain_id in prot_chain_ids:
-        start_idx, atom_count, coords = get_chain_coordinates(prot_chain_id)
+        start_idx, atom_count, coords = get_chain_coordinates(structure, prot_chain_id)
         protein_coords_list.append(coords)
         global_indices = np.arange(start_idx, start_idx + atom_count)
         protein_global_indices_list.append(global_indices)
@@ -151,7 +151,7 @@ def compute_connections(sample, structure, cutoff_distance=3.5):
     for atom_idx in range(peptide_start_idx, peptide_start_idx + peptide_atom_count):
         atom2chain[atom_idx] = peptide_chain_id
     for prot_chain_id in prot_chain_ids:
-        start_idx, atom_count, coords = get_chain_coordinates(prot_chain_id)
+        start_idx, atom_count, coords = get_chain_coordinates(structure, prot_chain_id)
         for atom_idx in range(start_idx, start_idx + atom_count):
             atom2chain[atom_idx] = prot_chain_id
 
