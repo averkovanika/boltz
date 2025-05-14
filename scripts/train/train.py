@@ -20,6 +20,35 @@ from pytorch_lightning.utilities import rank_zero_only
 
 from boltz.data.module.training import BoltzTrainingDataModule, DataConfig
 
+SEARCH_SPACE = {
+    "trainer.max_epochs":                               [10, 20, 30, 40, 50, 70, 100],
+    "trainer.gradient_clip_val":                        [1.0, 5.0, 10.0],
+    "model.training_args.recycling_steps":              list(range(1, 11)),
+    "model.training_args.sampling_steps":               [200, 250, 300, 350, 400, 450, 500],
+    "model.training_args.diffusion_multiplicity":       [4, 8, 12, 16, 20, 24],
+    "model.training_args.diffusion_samples":            [1, 3, 5, 7, 9],
+
+    "model.training_args.confidence_loss_weight":       [1e-4, 3e-4, 5e-4, 1e-3, 3e-3, 5e-3, 1e-2, 3e-2, 5e-2, 1e-1, 3e-1, 5e-1, 1.0, 3.0],
+    "model.training_args.diffusion_loss_weight":        [1e-1, 3e-1, 5e-1, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0],
+    "model.training_args.distogram_loss_weight":        [1e-3, 3e-3, 5e-3, 1e-2, 3e-2, 5e-2, 1e-1, 3e-1, 5e-1, 1.0, 3.0, 5.0],
+
+    "model.training_args.adam_beta_1":                  [0.80, 0.85, 0.90, 0.92, 0.94, 0.96, 0.98, 0.99, 0.995, 0.999],
+    "model.training_args.adam_beta_2":                  [0.90, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99, 0.995, 0.999],
+    "model.training_args.adam_eps":                     [1e-9, 3e-9, 1e-8, 3e-8, 1e-7, 3e-7, 1e-6, 3e-6, 1e-5, 3e-5],
+
+    "model.training_args.base_lr":                      [1e-8, 3e-8, 5e-8, 1e-7, 3e-7, 5e-7, 1e-6, 3e-6, 5e-6, 1e-5, 3e-5, 5e-5, 1e-4, 3e-4, 5e-4],
+    "model.training_args.max_lr":                       [1e-6, 3e-6, 5e-6, 1e-5, 3e-5, 5e-5, 1e-4, 3e-4, 5e-4, 1e-3, 3e-3, 5e-3, 1e-2, 3e-2, 5e-2],
+
+    "model.training_args.lr_warmup_no_steps":           [1000, 3000, 5000, 8000, 10000, 20000, 50000, 80000, 100000, 200000],
+    "model.training_args.lr_start_decay_after_n_steps": [50000, 80000, 100000, 150000, 200000, 300000, 400000, 500000, 800000, 1000000],
+    "model.training_args.lr_decay_every_n_steps":       [100, 250, 500, 750, 1000, 2000, 5000, 10000, 20000, 50000],
+    "model.training_args.lr_decay_factor":              [0.50, 0.70, 0.80, 0.85, 0.90, 0.92, 0.95, 0.97, 0.99, 1.00],
+
+    "model.msa_args.msa_dropout":                       [0.1, 0.15, 0.25],
+    "model.msa_args.z_dropout":                         [0.1, 0.25, 0.4],
+    "model.pairformer_args.dropout":                    [0.1, 0.25, 0.4],
+    "model.score_model_args.dropout":                   [0.1, 0.25, 0.4],
+}
 
 @dataclass
 class TrainConfig:
@@ -235,4 +264,50 @@ def train(raw_config: str, args: list[str]) -> None:  # noqa: C901, PLR0912, PLR
 if __name__ == "__main__":
     arg1 = sys.argv[1]
     arg2 = sys.argv[2:]
-    train(arg1, arg2)
+
+    step = "train" # default
+    raw_args = []
+    for arg in arg2:
+        if arg in ("train", "search") and step == "train":
+            step = arg
+        else:
+            raw_args.append(arg)
+
+    base_cfg = OmegaConf.load(arg1)
+    base_wandb_name = None
+    if base_cfg.get("wandb") and base_cfg.wandb.get("name"):
+        base_wandb_name = base_cfg.wandb.name
+
+    if step == "search":
+        override = next((a for a in raw_args if a.startswith("data.random_seed=")), None)
+        if override:
+            seed = int(override.split("=", 1)[1])
+        else:
+            seed = base_cfg.data.random_seed
+            raw_args.append(f"data.random_seed={seed}")
+        random.seed(seed)
+
+        search_config = {k: random.choice(v) for k, v in SEARCH_SPACE.items()}
+        print(search_config)
+
+        KEY_SHORT = {
+            "trainer.max_epochs": "ep",
+            "model.training_args.base_lr": "base_lr",
+            "model.training_args.max_lr": "max_lr",
+            "model.training_args.distogram_loss_weight": "dist_loss",
+            "model.training_args.lr_warmup_no_steps": "warmup",
+            "model.training_args.lr_decay_every_n_steps": "decay",
+        }
+
+        suffix = "_".join(
+            f"{KEY_SHORT[k]}{v}"
+            for k, v in search_config.items()
+            if k in KEY_SHORT
+        )
+
+        new_name = f"{step}_{seed}_{suffix}"
+        raw_args.append(f"wandb.name={new_name}")
+
+        raw_args += [f"{key}={value}" for key, value in search_config.items()]
+
+    train(arg1, raw_args)
